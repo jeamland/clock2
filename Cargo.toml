@@ -1,0 +1,18 @@
+[package]
+name = "clock2"
+version = "0.1.0"
+authors = ["Benno Rice <benno.rice@artprocessors.net>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arduino_nano33iot = { path="../atsamd/boards/arduino_nano33iot", features=["usb"] }
+cortex-m = "0.7"
+cortex-m-rt = "0.6"
+# cortex-m-rtic = { git = "https://github.com/rtic-rs/cortex-m-rtic", branch = "new_monotonic" }
+cortex-m-rtic = "0.5"
+embedded-hal = "0.2"
+panic-semihosting = "0.5"
+usb-device = "0.2"
+usbd-serial = "0.1"
