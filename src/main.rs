@@ -5,12 +5,10 @@ use arduino_nano33iot::prelude::*;
 use usb_device::prelude::*;
 
 use arduino_nano33iot::clock::GenericClockController;
-use arduino_nano33iot::delay::Delay;
 use arduino_nano33iot::usb::UsbBus;
+use cortex_m::asm;
 use usb_device::bus::UsbBusAllocator;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
-
-const BOOT_DELAY_MS: u16 = 100;
 
 #[rtic::app(device = arduino_nano33iot::pac, peripherals = true)]
 const APP: () = {
@@ -30,11 +28,8 @@ const APP: () = {
             &mut cx.device.SYSCTRL,
             &mut cx.device.NVMCTRL,
         );
-        let pins = arduino_nano33iot::Pins::new(cx.device.PORT);
-
-        let mut delay = Delay::new(cx.core.SYST, &mut clocks);
-
-        delay.delay_ms(BOOT_DELAY_MS);
+        let mut pins = arduino_nano33iot::Pins::new(cx.device.PORT);
+        let mut led = pins.led_sck.into_open_drain_output(&mut pins.port);
 
         *USB_BUS = Some(arduino_nano33iot::usb_allocator(
             cx.device.USB,
@@ -43,15 +38,16 @@ const APP: () = {
             pins.usb_dm,
             pins.usb_dp,
         ));
-        let usb_bus = USB_BUS.as_ref().unwrap();
 
-        let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x16c0, 0x27dd))
-            .manufacturer("Oddly Named Devices")
-            .product("Overcomplicated Clock")
-            .serial_number("OCC01")
-            .device_class(USB_CLASS_CDC)
-            .build();
-        let usb_serial = SerialPort::new(usb_bus);
+        let usb_serial = SerialPort::new(USB_BUS.as_ref().unwrap());
+        let usb_device =
+            UsbDeviceBuilder::new(USB_BUS.as_ref().unwrap(), UsbVidPid(0x16c0, 0x27dd))
+                .manufacturer("Oddly Named Devices")
+                .product("Overcomplicated Clock")
+                .serial_number("OCC01")
+                .device_class(USB_CLASS_CDC)
+                .build();
+        led.set_high().unwrap();
 
         init::LateResources {
             clocks,
@@ -65,9 +61,18 @@ const APP: () = {
         let device = cx.resources.usb_device;
         let serial = cx.resources.usb_serial;
 
-        device.poll(&mut [serial]);
+        if !device.poll(&mut [serial]) {
+            return;
+        }
 
         let mut buf = [0u8; 16];
         let _ = serial.read(&mut buf);
+    }
+
+    #[idle]
+    fn idle(_: idle::Context) -> ! {
+        loop {
+            asm::nop();
+        }
     }
 };
