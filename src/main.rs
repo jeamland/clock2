@@ -1,14 +1,16 @@
 #![no_main]
 #![no_std]
 
+use arduino_nano33iot::prelude::*;
 use usb_device::prelude::*;
 
 use arduino_nano33iot::clock::GenericClockController;
+use arduino_nano33iot::delay::Delay;
 use arduino_nano33iot::usb::UsbBus;
 use usb_device::bus::UsbBusAllocator;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
-static mut USB_BUS_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
+const BOOT_DELAY_MS: u16 = 100;
 
 #[rtic::app(device = arduino_nano33iot::pac, peripherals = true)]
 const APP: () = {
@@ -20,6 +22,8 @@ const APP: () = {
 
     #[init]
     fn init(mut cx: init::Context) -> init::LateResources {
+        static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
+
         let mut clocks = GenericClockController::with_internal_32kosc(
             cx.device.GCLK,
             &mut cx.device.PM,
@@ -28,23 +32,26 @@ const APP: () = {
         );
         let pins = arduino_nano33iot::Pins::new(cx.device.PORT);
 
-        let usb_allocator = unsafe {
-            USB_BUS_ALLOCATOR = Some(arduino_nano33iot::usb_allocator(
-                cx.device.USB,
-                &mut clocks,
-                &mut cx.device.PM,
-                pins.usb_dm,
-                pins.usb_dp,
-            ));
-            USB_BUS_ALLOCATOR.as_ref().unwrap()
-        };
-        let usb_device = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x2317, 0x1723))
+        let mut delay = Delay::new(cx.core.SYST, &mut clocks);
+
+        delay.delay_ms(BOOT_DELAY_MS);
+
+        *USB_BUS = Some(arduino_nano33iot::usb_allocator(
+            cx.device.USB,
+            &mut clocks,
+            &mut cx.device.PM,
+            pins.usb_dm,
+            pins.usb_dp,
+        ));
+        let usb_bus = USB_BUS.as_ref().unwrap();
+
+        let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x16c0, 0x27dd))
             .manufacturer("Oddly Named Devices")
             .product("Overcomplicated Clock")
             .serial_number("OCC01")
             .device_class(USB_CLASS_CDC)
             .build();
-        let usb_serial = SerialPort::new(usb_allocator);
+        let usb_serial = SerialPort::new(usb_bus);
 
         init::LateResources {
             clocks,
