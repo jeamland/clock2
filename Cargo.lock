@@ -141,6 +141,7 @@ dependencies = [
  "cortex-m-rt",
  "cortex-m-rtic",
  "embedded-hal",
+ "no-std-net",
  "panic-semihosting",
  "usb-device",
  "usbd-serial",

@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
+use core::time::Duration;
 
 use usb_device::prelude::*;
 
@@ -22,15 +23,23 @@ use atsamd_hal::hal::spi;
 use cortex_m::asm;
 use cortex_m::peripheral::SCB;
 use embedded_hal::digital::v2::OutputPin;
+use no_std_net::Ipv4Addr;
 use usb_device::bus::UsbBusAllocator;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
-use wifi_nina::{transport::SpiTransport, types::Config, Wifi};
+use wifi_nina::{
+    transport::SpiTransport,
+    types::{Config, ConnectionState},
+    Wifi,
+};
 
 const BOOT_LOADER_MAGIC: u32 = 0x007738135;
 const BOOT_LOADER_MAGIC_ADDRESS: usize = 0x20007FFC;
 
 const WIFI_SSID: &[u8] = b"TelstraF5474D";
 const WIFI_PASSPHRASE: &[u8] = b"C9AF1CC3A2";
+
+const NTP_SERVER: &str = "au.pool.ntp.org";
+const LOCAL_PORT: u16 = 2468;
 
 #[global_allocator]
 static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
@@ -212,11 +221,45 @@ const APP: () = {
             Err(e) => clog!(cx, "{:?}", e),
         };
 
-        clog!(
-            cx,
-            "{:?}",
-            nina.configure(Config::wpa_psk(WIFI_SSID, WIFI_PASSPHRASE), None)
-        );
+        match nina.configure(Config::wpa_psk(WIFI_SSID, WIFI_PASSPHRASE), None) {
+            Ok(_) => (),
+            Err(e) => {
+                clog!(cx, "failed join: {:?}", e);
+                return;
+            }
+        };
+
+        loop {
+            if let Ok(_) =
+                nina.await_connection_state(ConnectionState::Connected, Duration::from_secs(1))
+            {
+                clog!(cx, "Connected!");
+                break;
+            }
+            clog!(cx, "Connecting...");
+        }
+
+        // let ip = match nina.resolve(NTP_SERVER) {
+        //     Ok(a) => a,
+        //     Err(e) => {
+        //         clog!(cx, "Failed lookup: {:?}", e);
+        //         return;
+        //     }
+        // };
+        let addr: [u8; 4] = [10, 0, 0, 45];
+        let ip = Ipv4Addr::from(addr);
+
+        let mut client = match nina.new_udp(LOCAL_PORT) {
+            Ok(c) => c,
+            Err(e) => {
+                clog!(cx, "Client failed: {:?}", e);
+                return;
+            }
+        };
+
+        clog!(cx, "client created");
+
+        clog!(cx, "{:?}", client.send(nina, ip, 2222, &[1, 2, 3, 4]));
     }
 
     #[idle]
