@@ -4,25 +4,34 @@
 
 extern crate alloc;
 
-use alloc::collections::vec_deque::VecDeque;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::{
+    collections::vec_deque::VecDeque,
+    format,
+    string::{String, ToString},
+};
 use core::time::Duration;
 
 use usb_device::prelude::*;
 
 use alloc_cortex_m::CortexMHeap;
-use arduino_nano33iot::clock::GenericClockController;
-use arduino_nano33iot::delay::Delay;
-use arduino_nano33iot::gpio::{self, v2::*, Floating, Input, Port};
-use arduino_nano33iot::pac;
-use arduino_nano33iot::sercom::{self, Pad, Pad0, Pad1, Pad3, PadPin, SPIMaster2};
-use arduino_nano33iot::time::{Hertz, MegaHertz};
-use arduino_nano33iot::usb::UsbBus;
+use arduino_nano33iot::{
+    clock::{enable_internal_32kosc, ClockGenId, ClockSource, GenericClockController},
+    delay::Delay,
+    gpio::{self, v2::*, Floating, Input, Port},
+    pac,
+    rtc::Rtc,
+    sercom::{self, Pad, Pad0, Pad1, Pad3, PadPin, SPIMaster2},
+    time::{Hertz, MegaHertz, Microseconds},
+    timer::TimerCounter,
+    timer_traits::InterruptDrivenTimer,
+    usb::UsbBus,
+};
 use atsamd_hal::hal::spi;
-use cortex_m::asm;
-use cortex_m::peripheral::SCB;
-use embedded_hal::digital::v2::OutputPin;
+use cortex_m::{
+    asm,
+    peripheral::{NVIC, SCB},
+};
+use embedded_hal::{digital::v2::OutputPin, timer::CountDown};
 use no_std_net::Ipv4Addr;
 use usb_device::bus::UsbBusAllocator;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
@@ -35,8 +44,8 @@ use wifi_nina::{
 const BOOT_LOADER_MAGIC: u32 = 0x007738135;
 const BOOT_LOADER_MAGIC_ADDRESS: usize = 0x20007FFC;
 
-const WIFI_SSID: &[u8] = b"TelstraF5474D";
-const WIFI_PASSPHRASE: &[u8] = b"C9AF1CC3A2";
+const WIFI_SSID: &[u8] = b"NOT TELLING";
+const WIFI_PASSPHRASE: &[u8] = b"REALLY NOT TELLING";
 
 const NTP_SERVER: &str = "au.pool.ntp.org";
 const LOCAL_PORT: u16 = 2468;
@@ -53,6 +62,7 @@ type NinaTransport = SpiTransport<
     gpio::Pin<PA28, Input<Floating>>,
     gpio::Pin<PA08, Output<PushPull>>,
     gpio::Pin<PA14, Output<PushPull>>,
+    gpio::Pin<PA27, Input<Floating>>,
     Delay,
 >;
 type Nina = Wifi<NinaTransport>;
@@ -98,6 +108,7 @@ macro_rules! clog {
     ($cx:ident, $($arg:tt)*) => {{
         let res = format!($($arg)*);
         $cx.resources.log_buffer.push_back(res);
+        rtic::pend(pac::Interrupt::USB);
     }}
 }
 
@@ -134,6 +145,24 @@ const APP: () = {
         let mut pins = arduino_nano33iot::Pins::new(cx.device.PORT);
         let led = pins.led_sck.into_open_drain_output(&mut pins.port);
 
+        let timer_clock = clocks
+            .configure_gclk_divider_and_source(ClockGenId::GCLK3, 32, ClockSource::OSCULP32K, true)
+            .unwrap();
+        let rtc_clock = clocks.rtc(&timer_clock).unwrap();
+        clocks.configure_standby(ClockGenId::GCLK3, true);
+        let mut rtc = Rtc::new(cx.device.RTC, rtc_clock.freq(), &mut cx.device.PM);
+        rtc.enable_interrupt();
+        rtc.start(Microseconds(100_000));
+
+        // let tc_gclk = clocks
+        //     .configure_gclk_divider_and_source(ClockGenId::GCLK4, 32, ClockSource::OSC32K, true)
+        //     .unwrap();
+        // let tc_clock = clocks.tc4_tc5(&tc_gclk).unwrap();
+        // let mut tc5 = TimerCounter::tc5_(&tc_clock, cx.device.TC5, &mut cx.device.PM);
+        // rtic::pend(pac::Interrupt::TC5);
+        // tc5.enable_interrupt();
+        // tc5.start(Microseconds(1_000));
+
         *USB_BUS = Some(arduino_nano33iot::usb_allocator(
             cx.device.USB,
             &mut clocks,
@@ -164,14 +193,12 @@ const APP: () = {
         let busy = pins.nina_ack.into_floating_input(&mut pins.port);
         let reset = pins.nina_resetn.into_open_drain_output(&mut pins.port);
         let cs = pins.nina_cs.into_open_drain_output(&mut pins.port);
-        // let mut gpio0 = pins.nina_gpio0.into_open_drain_output(&mut pins.port);
-        // gpio0.set_high().unwrap();
-        let transport = SpiTransport::start(spi, busy, reset, cs, delay).unwrap();
+        let available = pins.nina_gpio0.into_floating_input(&mut pins.port);
+        let transport = SpiTransport::start(spi, busy, reset, cs, available, delay).unwrap();
         let nina = Wifi::new(transport);
-        // gpio0.set_low().unwrap();
 
         let mut log_buffer = VecDeque::new();
-        log_buffer.push_back("Hello from thing".to_string());
+        log_buffer.push_back(format!("Hello from thing: {:?}", rtc_clock.freq()));
 
         cx.spawn.wifi().unwrap();
 
@@ -185,10 +212,30 @@ const APP: () = {
         }
     }
 
+    #[task(binds=RTC, resources=[led, log_buffer])]
+    fn rtc(cx: rtc::Context) {
+        clog!(cx, "rtc tick");
+
+        let led = cx.resources.led;
+        led.set_low().unwrap();
+    }
+
+    #[task(binds=TC5, resources=[log_buffer])]
+    fn tc5(cx: tc5::Context) {
+        clog!(cx, "tc5 tick");
+    }
+
     #[task(binds=USB, resources=[usb_device, usb_serial, led, log_buffer])]
     fn usb(cx: usb::Context) {
         let device = cx.resources.usb_device;
         let serial = cx.resources.usb_serial;
+
+        if serial.dtr() {
+            while let Some(line) = cx.resources.log_buffer.pop_front() {
+                serial.write(line.as_bytes()).unwrap();
+                serial.write(b"\r\n").unwrap();
+            }
+        }
 
         if !device.poll(&mut [serial]) {
             return;
@@ -202,11 +249,6 @@ const APP: () = {
             && buf.iter().any(|&b| b == 0x2e)
         {
             reset_to_bootloader();
-        }
-
-        if let Some(line) = cx.resources.log_buffer.pop_front() {
-            serial.write(line.as_bytes()).unwrap();
-            serial.write(b"\r\n").unwrap();
         }
     }
 
@@ -246,7 +288,7 @@ const APP: () = {
         //         return;
         //     }
         // };
-        let addr: [u8; 4] = [10, 0, 0, 45];
+        let addr: [u8; 4] = [172, 16, 1, 38];
         let ip = Ipv4Addr::from(addr);
 
         let mut client = match nina.new_udp(LOCAL_PORT) {
@@ -259,7 +301,15 @@ const APP: () = {
 
         clog!(cx, "client created");
 
-        clog!(cx, "{:?}", client.send(nina, ip, 2222, &[1, 2, 3, 4]));
+        clog!(cx, "{:?}", client.send_to(nina, ip, 2222, &[1, 2, 3, 4]));
+        let mut buffer = [0; 16];
+        let res = client.recv(nina, &mut buffer);
+        clog!(cx, "{:?}", res);
+        if let Ok(x) = res {
+            if x > 0 {
+                clog!(cx, "received: {:?}", buffer);
+            }
+        }
     }
 
     #[idle]

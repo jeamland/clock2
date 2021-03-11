@@ -34,7 +34,7 @@ subprocess.check_call(
     ]
 )
 
-time.sleep(2)
+time.sleep(3)
 
 
 async def board_monitor(exit_event):
@@ -44,7 +44,7 @@ async def board_monitor(exit_event):
             if exit_event.is_set():
                 return
             with trio.move_on_after(1):
-                print(port.readline().strip())
+                print((await port.readline()).strip())
 
 
 async def ctrlc_monitor(exit_event):
